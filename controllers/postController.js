@@ -1,30 +1,34 @@
 const connection = require('../config/db');
+const fs = require('fs');
+const path = require('path');
 
-  exports.createPost = (req, res) => {
-    const { post_title, post_content, isRecipe, user_id, post_group } = req.body;
-    const imageUrls = req.files.map(file => `http://172.16.3.154:3000/uploads/${file.filename}`);
+//글 작성
+exports.createPost = (req, res) => {
+  const { post_title, post_content, isRecipe, user_id, post_group } = req.body;
+  const imagePaths = req.files.map(file => `uploads/${file.filename}`);
 
-    const query = 'INSERT INTO posts (category, is_recipe, user_id, title, content) VALUES (?, ?, ?, ?, ?)';
-    connection.query(query, [post_group, isRecipe, user_id, post_title, post_content], (error, results) => {
-      if (error) {
-        console.error('Error creating post:', error);
-        return res.status(500).json({ error: 'Internal server error' });
-      }
+  const query = 'INSERT INTO posts (category, is_recipe, user_id, title, content) VALUES (?, ?, ?, ?, ?)';
+  connection.query(query, [post_group, isRecipe, user_id, post_title, post_content], (error, results) => {
+    if (error) {
+      console.error('Error creating post:', error);
+      return res.status(500).json({ error: 'Internal server error' });
+    }
 
-      const post_id = results.insertId;
-      imageUrls.forEach(imageUrl => {
-        connection.query('INSERT INTO images (post_id, path) VALUES (?, ?)', [post_id, imageUrl], (error) => {
-          if (error) {
-            console.error('Error saving post images:', error);
-            return res.status(500).json({ error: 'Internal server error' });
-          }
-        });
+    const post_id = results.insertId;
+    imagePaths.forEach(imagePath => {
+      connection.query('INSERT INTO images (post_id, path) VALUES (?, ?)', [post_id, imagePath], (error) => {
+        if (error) {
+          console.error('Error saving post images:', error);
+          return res.status(500).json({ error: 'Internal server error' });
+        }
       });
-
-      res.status(201).json({ message: 'Post created successfully' });
     });
-  };
 
+    res.status(201).json({ message: 'Post created successfully', post_id });
+  });
+};
+
+//글 삭제
 exports.deletePost = (req, res) => {
   const postId = req.params.postId;
 
@@ -38,62 +42,93 @@ exports.deletePost = (req, res) => {
       return res.status(404).json({ error: 'Post not found' });
     }
 
-    connection.beginTransaction((beginTransactionErr) => {
-      if (beginTransactionErr) {
-        console.error('Error starting transaction:', beginTransactionErr);
+    connection.query('SELECT path FROM images WHERE post_id = ?', [postId], (selectImagesErr, imageResults) => {
+      if (selectImagesErr) {
+        console.error('Error fetching images for post:', selectImagesErr);
         return res.status(500).json({ error: 'Internal server error' });
       }
 
-      connection.query('DELETE FROM images WHERE post_id = ?', [postId], (deletePhotosErr) => {
-        if (deletePhotosErr) {
-          connection.rollback(() => {
-            console.error('Error deleting post images:', deletePhotosErr);
-            return res.status(500).json({ error: 'Internal server error' });
-          });
+      const imagePaths = imageResults.map(image => path.join(__dirname, '../', image.path));
+
+      connection.beginTransaction((beginTransactionErr) => {
+        if (beginTransactionErr) {
+          console.error('Error starting transaction:', beginTransactionErr);
+          return res.status(500).json({ error: 'Internal server error' });
         }
 
-        connection.query('DELETE FROM comments WHERE post_id = ?', [postId], (deleteCommentsErr) => {
-          if (deleteCommentsErr) {
-            connection.rollback(() => {
-              console.error('Error deleting post comments:', deleteCommentsErr);
-              return res.status(500).json({ error: 'Internal server error' });
+        const deleteFiles = imagePaths.map(filePath => {
+          return new Promise((resolve, reject) => {
+            fs.unlink(filePath, (unlinkErr) => {
+              if (unlinkErr) {
+                console.error('Error deleting file:', filePath, unlinkErr);
+                return reject(unlinkErr);
+              }
+              resolve();
             });
-          }
+          });
+        });
 
-          connection.query('DELETE FROM likes WHERE post_id = ?', [postId], (deleteLikesErr) => {
-            if (deleteLikesErr) {
-              connection.rollback(() => {
-                console.error('Error deleting post likes:', deleteLikesErr);
-                return res.status(500).json({ error: 'Internal server error' });
-              });
-            }
-
-            connection.query('DELETE FROM posts WHERE post_id = ?', [postId], (deletePostErr) => {
-              if (deletePostErr) {
+        Promise.all(deleteFiles)
+          .then(() => {
+            connection.query('DELETE FROM images WHERE post_id = ?', [postId], (deletePhotosErr) => {
+              if (deletePhotosErr) {
                 connection.rollback(() => {
-                  console.error('Error deleting post:', deletePostErr);
+                  console.error('Error deleting post images:', deletePhotosErr);
                   return res.status(500).json({ error: 'Internal server error' });
                 });
               }
 
-              connection.commit((commitErr) => {
-                if (commitErr) {
+              connection.query('DELETE FROM comments WHERE post_id = ?', [postId], (deleteCommentsErr) => {
+                if (deleteCommentsErr) {
                   connection.rollback(() => {
-                    console.error('Error committing transaction:', commitErr);
+                    console.error('Error deleting post comments:', deleteCommentsErr);
                     return res.status(500).json({ error: 'Internal server error' });
                   });
                 }
 
-                res.status(200).json({ message: 'Post and related data deleted successfully' });
+                connection.query('DELETE FROM likes WHERE post_id = ?', [postId], (deleteLikesErr) => {
+                  if (deleteLikesErr) {
+                    connection.rollback(() => {
+                      console.error('Error deleting post likes:', deleteLikesErr);
+                      return res.status(500).json({ error: 'Internal server error' });
+                    });
+                  }
+
+                  connection.query('DELETE FROM posts WHERE post_id = ?', [postId], (deletePostErr) => {
+                    if (deletePostErr) {
+                      connection.rollback(() => {
+                        console.error('Error deleting post:', deletePostErr);
+                        return res.status(500).json({ error: 'Internal server error' });
+                      });
+                    }
+
+                    connection.commit((commitErr) => {
+                      if (commitErr) {
+                        connection.rollback(() => {
+                          console.error('Error committing transaction:', commitErr);
+                          return res.status(500).json({ error: 'Internal server error' });
+                        });
+                      }
+
+                      res.status(200).json({ message: 'Post and related data deleted successfully' });
+                    });
+                  });
+                });
               });
             });
+          })
+          .catch((fileDeleteErr) => {
+            connection.rollback(() => {
+              console.error('Error deleting files:', fileDeleteErr);
+              return res.status(500).json({ error: 'Internal server error' });
+            });
           });
-        });
       });
     });
   });
 };
 
+//선택한 글 가져오기
 exports.getPostById = (req, res) => {
   const postId = req.params.post_id;
   const userId = req.query.user_id;
@@ -138,7 +173,11 @@ exports.getPostById = (req, res) => {
     }
 
     const post = results[0];
-    const imageUrls = post.imageUrls ? post.imageUrls.split(',') : [];
+    const serverUrl = 'http://192.168.40.1:3000/';
+    const imageUrls = post.imageUrls ? post.imageUrls.split(',').map(image => `${serverUrl}${image}`) : [];
+
+    // 디버깅을 위한 로그 추가
+
 
     res.status(200).json({ 
       message: 'Post loaded successfully', 
@@ -147,11 +186,14 @@ exports.getPostById = (req, res) => {
         post_content: post.content,
         post_group: post.category,
         isRecipe: post.is_recipe,
+        imageUrls: imageUrls,
       }
     });
   });
 };
 
+
+//전체 글 가져오기
 exports.getAllPosts = (req, res) => {
   const userId = req.query.user_id;
 
@@ -191,6 +233,7 @@ exports.getAllPosts = (req, res) => {
   });
 };
 
+//인기글 가져오기
 exports.getPopularPosts = (req, res) => {
   const userId = req.query.user_id;
   let daysInterval = 30;
